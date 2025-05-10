@@ -6,6 +6,7 @@ from collections import deque
 import threading
 import queue
 import re
+from langdetect import detect
 
 # Keyword lists for emotion detection
 EMOTION_KEYWORDS = {
@@ -25,8 +26,8 @@ EMOTION_SENTIMENT = {
 
 class SentimentChecker:
     def __init__(self, cache_size=100, smoothing_window=3):
-        self.model = None
-        self.tokenizer = None
+        self.models = {}
+        self.tokenizers = {}
         self.latency_history = deque(maxlen=100)
         self.smoothing_window = smoothing_window
         self.recent_predictions = deque(maxlen=smoothing_window)
@@ -37,8 +38,8 @@ class SentimentChecker:
         self.is_processing = False
         self.processing_thread = None
         
-        # Load model
-        self.model = self._load_model()
+        # Load models
+        self._load_models()
         
         # Set number of threads for CPU inference
         if not torch.cuda.is_available():
@@ -47,30 +48,33 @@ class SentimentChecker:
         # Start processing thread
         self.start_processing()
         
-    def _load_model(self):
-        """Load a better model for sentiment analysis"""
+    def _load_models(self):
+        """Load models for sentiment analysis"""
         try:
-            model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
+            # English model
+            en_model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+            self.tokenizers['en'] = AutoTokenizer.from_pretrained(
+                en_model_name,
                 model_max_length=128,
                 truncation=True
             )
-            
-            # Load model with reduced precision
-            model = AutoModelForSequenceClassification.from_pretrained(
-                model_name,
+            self.models['en'] = AutoModelForSequenceClassification.from_pretrained(
+                en_model_name,
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+            ).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu')).eval()
+            # Urdu model
+            ur_model_name = "urduhack/bert-base-urdu-sentiment-analysis"
+            self.tokenizers['ur'] = AutoTokenizer.from_pretrained(
+                ur_model_name,
+                model_max_length=128,
+                truncation=True
             )
-            
-            # Prepare model for quantization
-            model.eval()
-            model = model.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-            
-            return model
+            self.models['ur'] = AutoModelForSequenceClassification.from_pretrained(
+                ur_model_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+            ).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu')).eval()
         except Exception as e:
-            print(f"Error loading model: {str(e)}")
-            return None
+            print(f"Error loading models: {str(e)}")
 
     def start_processing(self):
         """Start the background processing thread"""
@@ -97,23 +101,35 @@ class SentimentChecker:
                 print(f"Error in processing thread: {str(e)}")
             time.sleep(0.001)  # Small sleep to prevent CPU overload
 
-    def _process_single_text(self, text: str) -> Tuple[float, float, str]:
+    def _detect_language(self, text: str) -> str:
+        """Detect language of the text"""
+        try:
+            lang = detect(text)
+            if lang.startswith('ur'):
+                return 'ur'
+            return 'en'
+        except Exception:
+            return 'en'
+
+    def _process_single_text(self, text: str) -> Tuple[float, float, str, str]:
         """Process a single text chunk with minimal latency"""
-        if self.model is None:
-            return 0.0, 0.0, 'neutral'
-            
+        lang = self._detect_language(text)
+        if lang not in self.models:
+            lang = 'en'
         # Rule-based override for emotion keywords
         for emotion, patterns in EMOTION_KEYWORDS.items():
             for pattern in patterns:
                 if re.search(pattern, text, re.IGNORECASE):
                     sentiment, confidence = EMOTION_SENTIMENT[emotion]
-                    return sentiment, confidence, emotion
+                    return sentiment, confidence, emotion, lang
             
         try:
             start_time = time.time()
             
             # Fast tokenization
-            inputs = self.tokenizer(
+            tokenizer = self.tokenizers[lang]
+            model = self.models[lang]
+            inputs = tokenizer(
                 text,
                 return_tensors="pt",
                 truncation=True,
@@ -122,39 +138,48 @@ class SentimentChecker:
             )
             
             # Move to device
-            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
             
             # Fast inference
             with torch.inference_mode():
-                outputs = self.model(**inputs)
+                outputs = model(**inputs)
                 logits = outputs.logits
                 probs = torch.nn.functional.softmax(logits, dim=-1)
                 
-                # For this model: 0=negative, 1=neutral, 2=positive
-                sentiment = probs[0][2].item() - probs[0][0].item()  # positive - negative
-                confidence = max(probs[0][0].item(), probs[0][2].item())
-                
-                # Assign emotion label based on sentiment
-                if sentiment > 0.5:
-                    emotion = 'happy'
-                elif sentiment < -0.7:
-                    emotion = 'angry'
-                elif sentiment < -0.3:
-                    emotion = 'sad'
-                else:
-                    emotion = 'neutral'
+                # For English: 0=negative, 1=neutral, 2=positive
+                # For Urdu: 0=negative, 1=positive
+                if lang == 'en':
+                    sentiment = probs[0][2].item() - probs[0][0].item()
+                    confidence = max(probs[0][0].item(), probs[0][2].item())
+                    if sentiment > 0.5:
+                        emotion = 'happy'
+                    elif sentiment < -0.7:
+                        emotion = 'angry'
+                    elif sentiment < -0.3:
+                        emotion = 'sad'
+                    else:
+                        emotion = 'neutral'
+                else:  # Urdu
+                    sentiment = probs[0][1].item() - probs[0][0].item()
+                    confidence = max(probs[0][0].item(), probs[0][1].item())
+                    if sentiment > 0.5:
+                        emotion = 'happy'
+                    elif sentiment < -0.3:
+                        emotion = 'sad'
+                    else:
+                        emotion = 'neutral'
                 
                 # Calculate latency
                 latency = (time.time() - start_time) * 1000
                 self.latency_history.append(latency)
                 
-                return sentiment, confidence, emotion
+                return sentiment, confidence, emotion, lang
                 
         except Exception as e:
             print(f"Error processing text: {str(e)}")
-            return 0.0, 0.0, 'neutral'
+            return 0.0, 0.0, 'neutral', lang
 
-    def analyze_sentiment(self, text: str) -> Tuple[float, float, str]:
+    def analyze_sentiment(self, text: str) -> Tuple[float, float, str, str]:
         """Analyze sentiment with streaming optimization"""
         if self.model is None:
             return 0.0, 0.0, 'neutral'
@@ -165,14 +190,15 @@ class SentimentChecker:
             
             # Get result from queue with timeout
             try:
-                sentiment, confidence, emotion = self.result_queue.get(timeout=0.1)  # 100ms timeout
+                sentiment, confidence, emotion, lang = self.result_queue.get(timeout=0.1)  # 100ms timeout
                 
                 # Apply smoothing
-                self.recent_predictions.append((sentiment, confidence, emotion))
+                self.recent_predictions.append((sentiment, confidence, emotion, lang))
                 if len(self.recent_predictions) == self.smoothing_window:
                     sentiments = [p[0] for p in self.recent_predictions]
                     confidences = [p[1] for p in self.recent_predictions]
                     emotions = [p[2] for p in self.recent_predictions]
+                    langs = [p[3] for p in self.recent_predictions]
                     
                     # Weighted average based on confidence
                     weights = [c for c in confidences]
@@ -182,16 +208,17 @@ class SentimentChecker:
                         confidence = sum(confidences) / len(confidences)
                         # Most common emotion
                         emotion = max(set(emotions), key=emotions.count)
+                        lang = max(set(langs), key=langs.count)
                 
-                return sentiment, confidence, emotion
+                return sentiment, confidence, emotion, lang
                 
             except queue.Empty:
                 print("Warning: Processing timeout")
-                return 0.0, 0.0, 'neutral'
+                return 0.0, 0.0, 'neutral', 'en'
                 
         except Exception as e:
             print(f"Error in analyze_sentiment: {str(e)}")
-            return 0.0, 0.0, 'neutral'
+            return 0.0, 0.0, 'neutral', 'en'
 
     def get_average_latency(self) -> float:
         """Get average latency from recent history"""

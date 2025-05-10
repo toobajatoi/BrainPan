@@ -20,6 +20,7 @@ def main():
         st.session_state.emotion_history = []
         st.session_state.sentiment_history = []
         st.session_state.text_emotion_history = []
+        st.session_state.text_lang_history = []
         st.session_state.timestamps = []
         st.session_state.emotion_latency = []
         st.session_state.sentiment_latency = []
@@ -52,13 +53,14 @@ def main():
         if st.button("Analyze Sentiment"):
             try:
                 t0 = time.time()
-                sentiment, conf, text_emotion = st.session_state.checker.analyze_sentiment(text)
+                sentiment, conf, text_emotion, text_lang = st.session_state.checker.analyze_sentiment(text)
                 t1 = time.time()
                 sent_latency = (t1 - t0) * 1000
                 st.session_state.sentiment_history.append((sentiment, conf))
                 st.session_state.text_emotion_history.append(text_emotion)
+                st.session_state.text_lang_history.append(text_lang)
                 st.session_state.sentiment_latency.append(sent_latency)
-                st.success(f"Sentiment: {sentiment:.2f} (confidence: {conf:.2f}) | Latency: {sent_latency:.1f} ms | Text Emotion: {text_emotion}")
+                st.success(f"Sentiment: {sentiment:.2f} (confidence: {conf:.2f}) | Latency: {sent_latency:.1f} ms | Text Emotion: {text_emotion} | Language: {text_lang}")
                 # Tone switching demo
                 if st.session_state.emotion_history:
                     emotion, emo_conf = st.session_state.emotion_history[-1]
@@ -73,7 +75,7 @@ def main():
     
     # Display current metrics
     st.subheader("Current Metrics")
-    metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
+    metrics_col1, metrics_col2, metrics_col3, metrics_col4, metrics_col5 = st.columns(5)
     
     with metrics_col1:
         if st.session_state.emotion_history:
@@ -101,6 +103,10 @@ def main():
     with metrics_col4:
         if st.session_state.text_emotion_history:
             st.metric("Text Emotion", st.session_state.text_emotion_history[-1])
+    
+    with metrics_col5:
+        if st.session_state.text_lang_history:
+            st.metric("Text Language", st.session_state.text_lang_history[-1])
     
     # Create plots
     st.subheader("History")
@@ -161,6 +167,25 @@ def main():
                 showlegend=True
             )
             st.plotly_chart(fig_text_emotion, use_container_width=True, key=f"text_emotion_chart_{time.time()}")
+        
+        # Text language plot
+        if st.session_state.text_lang_history:
+            fig_text_lang = go.Figure()
+            text_langs = st.session_state.text_lang_history
+            fig_text_lang.add_trace(go.Scatter(
+                x=list(range(len(text_langs))),
+                y=text_langs,
+                mode='lines+markers',
+                name='Text Language',
+                line=dict(color='cyan')
+            ))
+            fig_text_lang.update_layout(
+                title='Text Language History',
+                xaxis_title='Sample',
+                yaxis_title='Language',
+                showlegend=True
+            )
+            st.plotly_chart(fig_text_lang, use_container_width=True, key=f"text_lang_chart_{time.time()}")
         
         # Latency plots
         if st.session_state.emotion_latency:
