@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+config.env
+output.wav
+*.wav
+*.mp3
+*.pkl
+*.h5
+*.pt
+*.pth
+
+# Logs
+*.log
+logs/ 
