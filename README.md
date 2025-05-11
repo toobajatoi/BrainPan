@@ -1,62 +1,74 @@
-# BrainPan - Emotion & Sentiment Analysis Dashboard
+# Emotion Detection System
 
-A real-time emotion and sentiment analysis dashboard that uses machine learning to detect emotions from audio and analyze sentiment from text.
+A real-time emotion detection system that analyzes audio input to detect emotions (angry, happy, sad, neutral) using acoustic features and machine learning.
 
 ## Features
 
-- Real-time emotion detection from audio input
-- Text sentiment analysis
-- Interactive visualization of emotions and sentiments
-- Confidence scoring for predictions
+- Real-time audio emotion detection
+- Web-based dashboard interface
+- Support for multiple emotions (angry, happy, sad, neutral)
+- Low-latency processing
+- Audio feature extraction and analysis
+- Test audio generation for validation
 
-## Setup
+## Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/BrainPan.git
+git clone https://github.com/toobajatoi/BrainPan.git
 cd BrainPan
 ```
 
-2. Create a virtual environment and activate it:
-```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-```
-
-3. Install dependencies:
+2. Install the required dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-4. Create a `config.env` file with your API keys:
-```
-ELEVEN_LABS_API_KEY=your_api_key_here
+## Usage
+
+1. Run the emotion detection dashboard:
+```bash
+python emotion_dashboard.py
 ```
 
-5. Run the dashboard:
+2. Access the dashboard:
+- Local URL: http://127.0.0.1:7860
+- The dashboard will also provide a public URL for sharing
+
+3. Generate test audio samples:
 ```bash
-streamlit run dashboard.py
+python test_audio/generate_test_audio.py
 ```
 
 ## Project Structure
 
-- `dashboard.py`: Main Streamlit dashboard application
-- `emotion_detector.py`: Emotion detection from audio
-- `sentiment_checker.py`: Text sentiment analysis
-- `tone_switcher.py`: Tone switching based on emotions
+- `emotion_detector.py`: Core emotion detection logic
+- `emotion_dashboard.py`: Web-based dashboard interface
+- `test_audio/`: Test audio generation and validation
 - `requirements.txt`: Project dependencies
 
-## Requirements
+## How It Works
 
-- Python 3.8+
-- Streamlit
-- PyTorch
-- Transformers
-- SoundDevice
-- NumPy
-- Plotly
+The system uses acoustic features to detect emotions:
+- Intensity
+- Spectral centroid
+- Pitch
+- Zero crossing rate
+
+Each emotion has specific thresholds:
+- Angry: High intensity, high centroid, high ZCR
+- Happy: Moderate intensity, moderate-high centroid, moderate pitch
+- Sad: Low intensity, low centroid, low pitch
+- Neutral: Moderate values across all features
+
+## Contributing
+
+Feel free to submit issues and enhancement requests!
 
 ## License
 
-MIT License 
-MIT License 
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Author
+
+Tooba Jatoi 
