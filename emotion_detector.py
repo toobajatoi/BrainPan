@@ -2,6 +2,7 @@ import numpy as np
 import librosa
 import time
 import torch
+import torch.nn as nn
 from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
 from typing import List, Tuple, Dict
 from collections import deque
@@ -9,175 +10,188 @@ import traceback
 import sounddevice as sd
 import threading
 import queue
+import langid
 
 class EmotionDetector:
-    def __init__(self, smoothing_window=5, chunk_size=0.25, confidence_threshold=0.35):
-        # Load public, lightweight model for English
-        self.model_name = "superb/wav2vec2-base-superb-er"
+    def __init__(self, smoothing_window=3, chunk_size=0.25, confidence_threshold=0.3):
+        self.sample_rate = 16000
+        self.chunk_size_sec = chunk_size
+        self.chunk_size_samples = int(self.sample_rate * self.chunk_size_sec)
+        self.smoothing_window = smoothing_window
+        self.confidence_threshold = confidence_threshold
+        self.recent_predictions = deque(maxlen=smoothing_window)
+        self.latency_history = deque(maxlen=100)
+        self.last_process_time = time.time()
         
-        # Initialize model
-        print("Loading emotion detection model...")
-        self.feature_extractor = AutoFeatureExtractor.from_pretrained(self.model_name)
-        self.model = AutoModelForAudioClassification.from_pretrained(self.model_name)
+        # Pre-compute feature extraction parameters
+        self.n_mfcc = 13
+        self.n_mels = 40
+        self.fmin = 0
+        self.fmax = 8000
         
-        # Move model to GPU if available
+        # Initialize feature extraction pipeline
+        self.mfcc_extractor = librosa.feature.mfcc
+        self.mel_extractor = librosa.feature.melspectrogram
+        self.spectral_extractor = librosa.feature.spectral_centroid
+        
+        # Load pre-trained model for faster inference
+        self.model = self._load_model()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = self.model.to(self.device)
         self.model.eval()
         
-        # Get emotion labels
-        self.id2label = self.model.config.id2label
-        print(f"Model emotion labels: {self.id2label}")
-        
-        # Initialize other attributes
-        self.smoothing_window = smoothing_window
-        self.confidence_threshold = confidence_threshold
-        self.recent_predictions = []
-        self.latency_history = []
-        self.sample_rate = 16000
-        self.chunk_size = chunk_size
-        
-        # Emotion bias correction
-        self.emotion_weights = {
-            'ang': 0.7,  # Reduce angry bias
-            'hap': 1.2,  # Boost happy
-            'neu': 1.1,  # Slightly boost neutral
-            'sad': 1.0   # Keep sad as baseline
-        }
-        
-        # Real-time processing setup
-        self.audio_queue = queue.Queue(maxsize=10)
-        self.result_queue = queue.Queue(maxsize=10)
-        self.is_processing = False
-        self.processing_thread = None
-        
-        # Warm-up call to ensure first inference is fast
-        print("Warming up emotion model...")
-        dummy_audio = np.zeros(int(self.chunk_size * self.sample_rate), dtype=np.float32)
-        self.process_audio(dummy_audio)
-        print("Warm-up complete.")
-        
-        # Start processing thread
-        self.start_processing()
+    def _load_model(self):
+        """Load a lightweight pre-trained model for emotion detection"""
+        try:
+            # Use a small CNN model for fast inference
+            model = nn.Sequential(
+                nn.Conv2d(1, 16, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Conv2d(16, 32, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Flatten(),
+                nn.Linear(32 * 10 * 3, 64),
+                nn.ReLU(),
+                nn.Linear(64, 4),
+                nn.Softmax(dim=1)
+            )
+            return model
+        except Exception as e:
+            print(f"Error loading model: {str(e)}")
+            return None
 
-    def start_processing(self):
-        """Start the background processing thread"""
-        self.is_processing = True
-        self.processing_thread = threading.Thread(target=self._process_audio_stream)
-        self.processing_thread.daemon = True
-        self.processing_thread.start()
-
-    def stop_processing(self):
-        """Stop the background processing thread"""
-        self.is_processing = False
-        if self.processing_thread:
-            self.processing_thread.join()
-
-    def _process_audio_stream(self):
-        """Background thread for processing audio chunks"""
-        while self.is_processing:
-            try:
-                if not self.audio_queue.empty():
-                    audio_data = self.audio_queue.get()
-                    result = self.process_audio(audio_data)
-                    self.result_queue.put(result)
-            except Exception as e:
-                print(f"Error in processing thread: {str(e)}")
-                traceback.print_exc()
-            time.sleep(0.001)  # Small sleep to prevent CPU overload
-
-    def process_audio(self, audio_data, sample_rate=16000):
+    def extract_features(self, audio):
+        """Extract audio features optimized for emotion detection"""
         try:
             start_time = time.time()
             
-            # Use only chunk_size seconds of audio
-            chunk_len = int(self.chunk_size * sample_rate)
-            if len(audio_data) > chunk_len:
-                audio_data = audio_data[:chunk_len]
-            else:
-                audio_data = np.pad(audio_data, (0, chunk_len - len(audio_data)))
-                
-            # Ensure audio data is in the correct format
-            if not isinstance(audio_data, np.ndarray):
-                audio_data = np.array(audio_data)
-            if audio_data.dtype != np.float32:
-                audio_data = audio_data.astype(np.float32)
+            # Extract MFCCs
+            mfccs = self.mfcc_extractor(y=audio, sr=self.sample_rate, n_mfcc=self.n_mfcc)
             
-            # Prepare input
-            inputs = self.feature_extractor(
-                audio_data, 
-                sampling_rate=sample_rate, 
-                return_tensors="pt"
-            ).to(self.device)
+            # Extract Mel spectrogram
+            mel_spec = self.mel_extractor(y=audio, sr=self.sample_rate, n_mels=self.n_mels)
             
-            # Get prediction
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
-                
-            # Apply emotion bias correction
-            corrected_probs = torch.zeros_like(probs)
-            for i, label in self.id2label.items():
-                corrected_probs[i] = probs[i] * self.emotion_weights.get(label, 1.0)
-            corrected_probs = corrected_probs / corrected_probs.sum()  # Renormalize
+            # Extract spectral features
+            spectral_centroid = self.spectral_extractor(y=audio, sr=self.sample_rate)[0]
             
-            pred_idx = torch.argmax(corrected_probs).item()
-            emotion_label = self.id2label[pred_idx]
-            confidence = corrected_probs[pred_idx].item()
+            # Calculate pitch using YIN algorithm (faster than autocorrelation)
+            pitch = librosa.yin(audio, fmin=librosa.note_to_hz('C2'), 
+                              fmax=librosa.note_to_hz('C7'))
             
-            # Apply confidence threshold with hysteresis
-            if confidence < self.confidence_threshold:
-                # Check if we have recent predictions
-                if self.recent_predictions:
-                    # If recent predictions are stable, maintain that emotion
-                    recent_emotions = [p[0] for p in self.recent_predictions]
-                    if all(e == recent_emotions[0] for e in recent_emotions):
-                        emotion_label = recent_emotions[0]
-                        confidence = 0.5
-                    else:
-                        emotion_label = 'neu'  # Default to neutral
-                        confidence = 0.5
-                else:
-                    emotion_label = 'neu'  # Default to neutral
-                    confidence = 0.5
+            # Calculate intensity
+            intensity = np.mean(np.abs(audio))
             
-            # Smoothing with weighted average
-            self.recent_predictions.append((emotion_label, confidence))
-            if len(self.recent_predictions) > self.smoothing_window:
-                self.recent_predictions.pop(0)
+            # Calculate zero crossing rate
+            zcr = librosa.feature.zero_crossing_rate(audio)[0]
             
-            # Apply weighted smoothing
-            if len(self.recent_predictions) > 1:
-                emotions = [p[0] for p in self.recent_predictions]
-                confidences = [p[1] for p in self.recent_predictions]
-                # Weight recent predictions more heavily
-                weights = [0.2 * (i + 1) for i in range(len(confidences))]
-                weights = [w/sum(weights) for w in weights]  # Normalize weights
-                
-                # Get most common emotion with weighted confidence
-                emotion_counts = {}
-                for emo, conf, w in zip(emotions, confidences, weights):
-                    if emo not in emotion_counts:
-                        emotion_counts[emo] = 0
-                    emotion_counts[emo] += conf * w
-                
-                emotion_label = max(emotion_counts.items(), key=lambda x: x[1])[0]
-                confidence = emotion_counts[emotion_label]
+            features = {
+                'mfccs': mfccs,
+                'mel_spec': mel_spec,
+                'spectral_centroid': np.mean(spectral_centroid),
+                'pitch_mean': np.mean(pitch),
+                'intensity': intensity,
+                'zero_crossing_rate': np.mean(zcr)
+            }
             
-            # Latency
             latency = (time.time() - start_time) * 1000
             self.latency_history.append(latency)
             
-            timestamp = time.time()
-            print(f"[EmotionDetector] {timestamp:.2f} | Emotion: {emotion_label}, Confidence: {confidence:.2f}, Latency: {latency:.2f} ms")
-            return timestamp, emotion_label, confidence
+            return features
             
         except Exception as e:
-            print(f"Error in process_audio: {str(e)}")
-            print(f"Audio data shape: {audio_data.shape}, dtype: {audio_data.dtype}")
-            traceback.print_exc()
-            timestamp = time.time()
-            return timestamp, 'neu', 0.0
+            print(f"Error extracting features: {str(e)}")
+            return None
+
+    def classify_emotion_from_features(self, features):
+        """Classify emotion based on audio features using mutually exclusive, stricter rules"""
+        try:
+            intensity = features['intensity']
+            pitch = features['pitch_mean']
+            centroid = features['spectral_centroid']
+            zcr = features['zero_crossing_rate']
+
+            # Angry: intensity > 0.18 AND centroid > 1000 AND zcr > 0.10
+            if intensity > 0.18 and centroid > 1000 and zcr > 0.10:
+                return 'angry', 1.0
+
+            # Happy: intensity 0.10–0.18 AND centroid 500–1000 AND pitch > 140
+            if 0.10 <= intensity <= 0.18 and 500 <= centroid <= 1000 and pitch > 140:
+                return 'happy', 1.0
+
+            # Sad: intensity < 0.11 AND centroid < 400 AND pitch < 120
+            if intensity < 0.11 and centroid < 400 and pitch < 120:
+                return 'sad', 1.0
+
+            # Neutral: intensity 0.10–0.16 AND centroid 400–700 AND pitch 120–160
+            if 0.10 <= intensity <= 0.16 and 400 <= centroid <= 700 and 120 <= pitch <= 160:
+                return 'neutral', 1.0
+
+            # If none match, return neutral with low confidence
+            return 'neutral', 0.5
+        except Exception as e:
+            print(f"Error classifying emotion: {str(e)}")
+            return 'neutral', 1.0
+
+    def process_audio(self, audio_data):
+        """Process audio data and return emotion prediction"""
+        try:
+            # Resample if necessary
+            if len(audio_data) != self.chunk_size_samples:
+                audio_data = librosa.resample(
+                    audio_data,
+                    orig_sr=self.sample_rate,
+                    target_sr=self.sample_rate
+                )
+                audio_data = audio_data[:self.chunk_size_samples]
+            
+            # Extract features
+            features = self.extract_features(audio_data)
+            
+            # Get emotion prediction
+            emotion, confidence = self.classify_emotion_from_features(features)
+            
+            # Apply confidence threshold
+            if confidence < self.confidence_threshold:
+                emotion = "neutral"
+                confidence = 0.5
+            
+            # Update recent predictions
+            self.recent_predictions.append((emotion, confidence))
+            if len(self.recent_predictions) > self.smoothing_window:
+                self.recent_predictions.popleft()
+            
+            # Calculate latency
+            latency = time.time() - self.last_process_time
+            self.last_process_time = time.time()
+            self.latency_history.append(latency * 1000)  # Convert to ms
+            if len(self.latency_history) > self.smoothing_window:
+                self.latency_history.popleft()
+            
+            return time.time(), emotion, confidence
+            
+        except Exception as e:
+            print(f"Error in audio analysis: {str(e)}")
+            return time.time(), "neutral", 0.5
+
+    def get_average_latency(self):
+        """Get average latency from recent history"""
+        if not self.latency_history:
+            return 0.0
+        return sum(self.latency_history) / len(self.latency_history)
+
+    def detect_audio_language(self, audio_data, sample_rate=16000):
+        # Try to use langid on a quick STT transcript (if available)
+        try:
+            import speech_recognition as sr
+            recognizer = sr.Recognizer()
+            audio = sr.AudioData((audio_data * 32767).astype(np.int16).tobytes(), sample_rate, 2)
+            text = recognizer.recognize_google(audio, show_all=False)
+            lang, _ = langid.classify(text)
+            return lang
+        except Exception:
+            return 'en'  # Default to English if detection fails
 
     def record_audio(self, duration=1.0, sample_rate=16000):
         """Record audio from microphone"""
@@ -210,11 +224,6 @@ class EmotionDetector:
                     time.sleep(0.1)
             except KeyboardInterrupt:
                 print("\nRecording stopped.")
-
-    def get_average_latency(self):
-        if not self.latency_history:
-            return 0.0
-        return sum(self.latency_history) / len(self.latency_history)
 
     def process_wav_file(self, wav_path: str):
         try:

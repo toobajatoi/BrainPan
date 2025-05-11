@@ -10,7 +10,6 @@ import queue
 class ToneSwitcher:
     def __init__(self, cache_size=100, smoothing_window=3):
         load_dotenv()
-        # self.api_key = os.getenv('ELEVEN_LABS_API_KEY')  # Only needed for speech
         self.latency_history = deque(maxlen=100)
         self.smoothing_window = smoothing_window
         self.recent_predictions = deque(maxlen=smoothing_window)
@@ -26,14 +25,17 @@ class ToneSwitcher:
         # Start processing thread
         self.start_processing()
         
-        # Define tone mappings
+        # Define tone mappings with optimized parameters
         self.tone_mappings = {
-            'neutral': {'stability': 0.7, 'similarity_boost': 0.7},
-            'happy': {'stability': 0.3, 'similarity_boost': 0.8},
-            'gentle': {'stability': 0.8, 'similarity_boost': 0.5},
-            'calm': {'stability': 0.9, 'similarity_boost': 0.4},
-            'angry': {'stability': 0.5, 'similarity_boost': 0.5}
+            'neutral': {'stability': 0.7, 'similarity_boost': 0.7, 'style': 0.0, 'use_speaker_boost': True},
+            'happy': {'stability': 0.3, 'similarity_boost': 0.8, 'style': 0.3, 'use_speaker_boost': True},
+            'gentle': {'stability': 0.8, 'similarity_boost': 0.5, 'style': 0.2, 'use_speaker_boost': True},
+            'calm': {'stability': 0.9, 'similarity_boost': 0.4, 'style': 0.1, 'use_speaker_boost': True},
+            'angry': {'stability': 0.5, 'similarity_boost': 0.5, 'style': 0.4, 'use_speaker_boost': True}
         }
+        
+        # Initialize voice settings cache
+        self.voice_cache = {}
     
     def start_processing(self):
         """Start the background processing thread"""
@@ -64,6 +66,7 @@ class ToneSwitcher:
         """Internal method to determine tone with minimal latency"""
         try:
             start_time = time.time()
+            
             # Rule: low confidence in both → neutral
             if emotion_conf < self.confidence_threshold and sentiment_conf < self.confidence_threshold:
                 tone = 'neutral'
@@ -94,10 +97,12 @@ class ToneSwitcher:
                         tone = 'gentle'
                     else:
                         tone = 'neutral'
+                        
             latency = (time.time() - start_time) * 1000
             self.latency_history.append(latency)
             print(f"[ToneSwitcher] Tone: {tone}, Latency: {latency:.2f} ms")
             return tone
+            
         except Exception as e:
             print(f"Error determining tone: {str(e)}")
             return 'neutral'
@@ -140,37 +145,43 @@ class ToneSwitcher:
 
     def adjust_tone(self, text: str, emotion: str, sentiment: str) -> bytes:
         """Generate speech with the current tone settings"""
-        # Only require API key here
-        api_key = os.getenv('ELEVEN_LABS_API_KEY')
-        if not api_key:
-            raise ValueError("ELEVEN_LABS_API_KEY not found in environment variables")
-        start_time = time.time()
-        
-        # Combine emotion and sentiment for better tone adjustment
-        if emotion == 'happy' and sentiment == 'positive':
-            settings = self.tone_mappings['happy']
-        elif emotion == 'sad' and sentiment == 'negative':
-            settings = self.tone_mappings['angry']
-        elif emotion == 'angry' and sentiment == 'negative':
-            settings = self.tone_mappings['angry']
-        else:
-            settings = self.tone_mappings['neutral']
-
         try:
+            start_time = time.time()
+            
+            # Get API key
+            api_key = os.getenv('ELEVEN_LABS_API_KEY')
+            if not api_key:
+                raise ValueError("ELEVEN_LABS_API_KEY not found in environment variables")
+            
+            # Get tone settings
+            tone = self.determine_tone(emotion, 1.0, float(sentiment), 1.0)
+            settings = self.tone_mappings[tone]
+            
+            # Check cache for voice settings
+            cache_key = f"{tone}_{text[:50]}"  # Use first 50 chars as key
+            if cache_key in self.voice_cache:
+                return self.voice_cache[cache_key]
+            
+            # Generate audio
             audio = ElevenLabs(api_key=api_key).generate(
                 text=text,
                 voice=Voice(
                     voice_id="EXAVITQu4vr4xnSDxMaL",
                     settings=VoiceSettings(
                         stability=settings['stability'],
-                        similarity_boost=settings['similarity_boost']
+                        similarity_boost=settings['similarity_boost'],
+                        style=settings['style'],
+                        use_speaker_boost=settings['use_speaker_boost']
                     )
                 ),
                 model="eleven_monolingual_v1"
             )
             
+            # Cache the result
+            self.voice_cache[cache_key] = audio
+            
             # Calculate latency
-            latency = (time.time() - start_time) * 1000  # Convert to milliseconds
+            latency = (time.time() - start_time) * 1000
             self.latency_history.append(latency)
             
             return audio
