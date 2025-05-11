@@ -64,16 +64,23 @@ class ToneSwitcher:
         """Internal method to determine tone with minimal latency"""
         try:
             start_time = time.time()
-            
-            # Fast decision making
+            # Rule: low confidence in both → neutral
             if emotion_conf < self.confidence_threshold and sentiment_conf < self.confidence_threshold:
                 tone = 'neutral'
             else:
-                # Weighted decision based on confidence
-                if emotion_conf > sentiment_conf:
-                    # Emotion-based decision
+                # Rule: Angry/sad + negative → calm
+                if (emotion in ['angry', 'sad'] and sentiment < -0.3):
+                    tone = 'calm'
+                # Rule: Happy + positive → happy
+                elif (emotion == 'happy' and sentiment > 0.3):
+                    tone = 'happy'
+                # Rule: Neutral/low confidence → neutral
+                elif emotion == 'neutral' or abs(sentiment) < 0.3:
+                    tone = 'neutral'
+                # Fallback: weighted decision
+                elif emotion_conf > sentiment_conf:
                     if emotion == 'angry':
-                        tone = 'calm'  # Counteract anger
+                        tone = 'calm'
                     elif emotion == 'happy':
                         tone = 'happy'
                     elif emotion == 'sad':
@@ -81,20 +88,16 @@ class ToneSwitcher:
                     else:
                         tone = 'neutral'
                 else:
-                    # Sentiment-based decision
                     if sentiment > 0.3:
                         tone = 'happy'
                     elif sentiment < -0.3:
                         tone = 'gentle'
                     else:
                         tone = 'neutral'
-            
-            # Calculate latency
             latency = (time.time() - start_time) * 1000
             self.latency_history.append(latency)
-            
+            print(f"[ToneSwitcher] Tone: {tone}, Latency: {latency:.2f} ms")
             return tone
-            
         except Exception as e:
             print(f"Error determining tone: {str(e)}")
             return 'neutral'

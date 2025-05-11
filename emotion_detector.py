@@ -11,7 +11,7 @@ import threading
 import queue
 
 class EmotionDetector:
-    def __init__(self, smoothing_window=3, chunk_size=0.25):
+    def __init__(self, smoothing_window=5, chunk_size=0.25, confidence_threshold=0.35):
         # Load public, lightweight model for English
         self.model_name = "superb/wav2vec2-base-superb-er"
         
@@ -31,10 +31,19 @@ class EmotionDetector:
         
         # Initialize other attributes
         self.smoothing_window = smoothing_window
+        self.confidence_threshold = confidence_threshold
         self.recent_predictions = []
         self.latency_history = []
         self.sample_rate = 16000
         self.chunk_size = chunk_size
+        
+        # Emotion bias correction
+        self.emotion_weights = {
+            'ang': 0.7,  # Reduce angry bias
+            'hap': 1.2,  # Boost happy
+            'neu': 1.1,  # Slightly boost neutral
+            'sad': 1.0   # Keep sad as baseline
+        }
         
         # Real-time processing setup
         self.audio_queue = queue.Queue(maxsize=10)
@@ -106,26 +115,69 @@ class EmotionDetector:
                 outputs = self.model(**inputs)
                 probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
                 
-            pred_idx = torch.argmax(probs).item()
-            emotion_label = self.id2label[pred_idx]
-            confidence = probs[pred_idx].item()
+            # Apply emotion bias correction
+            corrected_probs = torch.zeros_like(probs)
+            for i, label in self.id2label.items():
+                corrected_probs[i] = probs[i] * self.emotion_weights.get(label, 1.0)
+            corrected_probs = corrected_probs / corrected_probs.sum()  # Renormalize
             
-            # Smoothing
+            pred_idx = torch.argmax(corrected_probs).item()
+            emotion_label = self.id2label[pred_idx]
+            confidence = corrected_probs[pred_idx].item()
+            
+            # Apply confidence threshold with hysteresis
+            if confidence < self.confidence_threshold:
+                # Check if we have recent predictions
+                if self.recent_predictions:
+                    # If recent predictions are stable, maintain that emotion
+                    recent_emotions = [p[0] for p in self.recent_predictions]
+                    if all(e == recent_emotions[0] for e in recent_emotions):
+                        emotion_label = recent_emotions[0]
+                        confidence = 0.5
+                    else:
+                        emotion_label = 'neu'  # Default to neutral
+                        confidence = 0.5
+                else:
+                    emotion_label = 'neu'  # Default to neutral
+                    confidence = 0.5
+            
+            # Smoothing with weighted average
             self.recent_predictions.append((emotion_label, confidence))
             if len(self.recent_predictions) > self.smoothing_window:
                 self.recent_predictions.pop(0)
+            
+            # Apply weighted smoothing
+            if len(self.recent_predictions) > 1:
+                emotions = [p[0] for p in self.recent_predictions]
+                confidences = [p[1] for p in self.recent_predictions]
+                # Weight recent predictions more heavily
+                weights = [0.2 * (i + 1) for i in range(len(confidences))]
+                weights = [w/sum(weights) for w in weights]  # Normalize weights
                 
+                # Get most common emotion with weighted confidence
+                emotion_counts = {}
+                for emo, conf, w in zip(emotions, confidences, weights):
+                    if emo not in emotion_counts:
+                        emotion_counts[emo] = 0
+                    emotion_counts[emo] += conf * w
+                
+                emotion_label = max(emotion_counts.items(), key=lambda x: x[1])[0]
+                confidence = emotion_counts[emotion_label]
+            
             # Latency
             latency = (time.time() - start_time) * 1000
             self.latency_history.append(latency)
             
-            return emotion_label, confidence, 'en'
+            timestamp = time.time()
+            print(f"[EmotionDetector] {timestamp:.2f} | Emotion: {emotion_label}, Confidence: {confidence:.2f}, Latency: {latency:.2f} ms")
+            return timestamp, emotion_label, confidence
             
         except Exception as e:
             print(f"Error in process_audio: {str(e)}")
             print(f"Audio data shape: {audio_data.shape}, dtype: {audio_data.dtype}")
             traceback.print_exc()
-            return 'neutral', 0.0, 'en'
+            timestamp = time.time()
+            return timestamp, 'neu', 0.0
 
     def record_audio(self, duration=1.0, sample_rate=16000):
         """Record audio from microphone"""
@@ -176,8 +228,8 @@ class EmotionDetector:
             
             results = []
             for i, chunk in enumerate(chunks):
-                emotion, conf, lang = self.process_audio(chunk)
-                results.append((i, emotion, conf, lang))
+                timestamp, emotion, conf = self.process_audio(chunk)
+                results.append((timestamp, emotion, conf))
             return results
         except Exception as e:
             print(f"Error in process_wav_file: {str(e)}")

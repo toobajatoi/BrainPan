@@ -53,13 +53,15 @@ def main():
         if st.button("Analyze Sentiment"):
             try:
                 t0 = time.time()
-                sentiment, conf, text_emotion, text_lang = st.session_state.checker.analyze_sentiment(text)
+                sentiment, conf, text_emotion, text_lang, warning = st.session_state.checker.analyze_sentiment(text)
                 t1 = time.time()
                 sent_latency = (t1 - t0) * 1000
                 st.session_state.sentiment_history.append((sentiment, conf))
                 st.session_state.text_emotion_history.append(text_emotion)
                 st.session_state.text_lang_history.append(text_lang)
                 st.session_state.sentiment_latency.append(sent_latency)
+                if warning:
+                    st.warning(warning)
                 st.success(f"Sentiment: {sentiment:.2f} (confidence: {conf:.2f}) | Latency: {sent_latency:.1f} ms | Text Emotion: {text_emotion} | Language: {text_lang}")
                 # Tone switching demo
                 if st.session_state.emotion_history:
