@@ -1,4 +1,4 @@
-name: Deploy to GitHub Pages
+name: Deploy to Hugging Face Spaces
 
 on:
   push:
@@ -20,17 +20,35 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install huggingface_hub
           
-      - name: Build and deploy
+      - name: Deploy to Hugging Face Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          mkdir -p docs
-          cp index.html docs/
-          cp -r test_audio docs/
-          cp emotion_detector.py docs/
-          cp emotion_dashboard.py docs/
-          
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./docs 
+          python -c "
+          from huggingface_hub import HfApi, create_repo
+          api = HfApi(token='$HF_TOKEN')
+          try:
+              create_repo('toobajatoi/emotion-detection', repo_type='space', space_sdk='gradio')
+          except:
+              pass
+          api.upload_file(
+              path_or_fileobj='emotion_dashboard.py',
+              path_in_repo='app.py',
+              repo_id='toobajatoi/emotion-detection',
+              repo_type='space'
+          )
+          api.upload_file(
+              path_or_fileobj='emotion_detector.py',
+              path_in_repo='emotion_detector.py',
+              repo_id='toobajatoi/emotion-detection',
+              repo_type='space'
+          )
+          api.upload_file(
+              path_or_fileobj='requirements.txt',
+              path_in_repo='requirements.txt',
+              repo_id='toobajatoi/emotion-detection',
+              repo_type='space'
+          )
+          " 
